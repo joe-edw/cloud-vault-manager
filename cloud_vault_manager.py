@@ -100,7 +100,13 @@ with tab1:
 
 with tab2:
     st.subheader("Active Monitoring: Undervalued Alert Scanner")
-    active = df[df["Listing Status"] == "Fixed Price"].copy()
+    # Truly active = listed at a fixed price AND not yet sold.
+    # (Sold cards keep Listing Status "Fixed Price", so also exclude anything with a sold status/price.)
+    active = df[
+        (df["Listing Status"] == "Fixed Price")
+        & (~df["Sold Status"].str.lower().isin(["sold", "processing payout"]))
+        & (df["Sold Price"] == 0)
+    ].copy()
     if active.empty:
         st.info("No items currently listed.")
     else:
