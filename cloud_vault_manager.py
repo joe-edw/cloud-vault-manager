@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import base64
+import io
 
 st.set_page_config(page_title="Cloud Vault Manager", layout="wide")
 
@@ -253,6 +254,7 @@ if recover and deficit > 0 and catchup_rate > 0:
 elif deficit > 0:
     st.caption(f"Past realized loss of ${deficit:,.2f} is NOT being recovered in pricing (catch-up off).")
 
+exports = {}  # collected per-tab views for the combined Excel export
 tab1, tab2, tab3 = st.tabs(["Unlisted Vault", "Active eBay Listings", "Sold History"])
 
 with tab1:
@@ -280,6 +282,7 @@ with tab1:
                                "Suggested List": MONEY, "Proj Net": MONEY})
             .apply(row_highlight, axis=1),
             use_container_width=True)
+        exports["Unlisted Vault"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "unlisted_vault.csv", "text/csv", key="dl_unlisted")
 
@@ -335,6 +338,7 @@ with tab2:
                                "Suggested List": MONEY, "Proj Net": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
+        exports["Active eBay Listings"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "active_listings.csv", "text/csv", key="dl_active")
 
@@ -358,5 +362,19 @@ with tab3:
             view.style.format({"My Cost": MONEY, "Sold Price": MONEY, "Sold Fees": MONEY,
                                "Net Payout": MONEY, "Net Profit": MONEY, "ROI %": PCT}),
             use_container_width=True)
+        exports["Sold History"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "sold_history.csv", "text/csv", key="dl_sold")
+
+# Combined Excel export: all sections as separate sheets in one workbook.
+if exports:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name, v in exports.items():
+            v.to_excel(writer, sheet_name=name[:31], index=False)
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        "Download all sections (Excel)", buf.getvalue(),
+        "cloud_vault_manager.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_all")
