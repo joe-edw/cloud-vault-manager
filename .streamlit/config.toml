@@ -1,0 +1,4 @@
+[client]
+# Hide the developer toolbar/menu so its keyboard shortcuts (C = clear cache,
+# R = rerun) don't intercept Ctrl+C copying from tables.
+toolbarMode = "minimal"
