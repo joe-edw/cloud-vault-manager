@@ -38,6 +38,22 @@ def clean_money(series):
         errors="coerce",
     ).fillna(0.0)
 
+def norm_cert(c):
+    c = str(c).strip()
+    if c.endswith(".0"):
+        c = c[:-2]
+    return c.lstrip("0") or c
+
+@st.cache_data(ttl=3600)
+def load_card_ladder_values():
+    # Bundled Card Ladder values (cert -> value), refreshed from a Card Ladder export.
+    try:
+        cl = pd.read_csv("card_ladder_values.csv", dtype=str)
+        return {norm_cert(c): float(v) for c, v in
+                zip(cl["Cert Number"], cl["Card Ladder Value"]) if v}
+    except Exception:
+        return {}
+
 def process(df):
     df = df.rename(columns={"Subject": "subject"})
     for col in ["Year", "Set", "Card Number", "subject", "Variety", "Grade Issuer", "Grade",
@@ -55,6 +71,12 @@ def process(df):
     df["Variety"] = df["Variety"].astype(str).str.strip().replace("-", "")
     df["Break-Even Floor"] = df["My Cost"].apply(break_even)
     df["Target Price"] = df["Break-Even Floor"].apply(target_price)
+
+    # Merge bundled Card Ladder values by cert number (overrides the blank column).
+    cl_map = load_card_ladder_values()
+    if cl_map and "Cert Number" in df.columns:
+        df["Card Ladder Value"] = df["Cert Number"].map(
+            lambda c: cl_map.get(norm_cert(c), 0.0))
     return df
 
 def row_highlight(row):
