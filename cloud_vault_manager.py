@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import base64
 
 st.set_page_config(page_title="Cloud Vault Manager", layout="wide")
 
@@ -61,47 +62,73 @@ def row_highlight(row):
     return [color] * len(row)
 
 # ---------------------------------------------------------------------------
-# PriceCharting live market value
-# PriceCharting reuses video-game field names for cards. Mapping (verify in
-# their API docs once your key is live):
-#   loose-price       -> Ungraded / raw
-#   graded-price      -> PSA 9
-#   manual-only-price -> PSA 10
-#   box-only-price    -> BGS 9.5
-#   bgs-10-price      -> BGS 10
-# Prices are returned in pennies (integer).
+# eBay Browse API — free, official. Market value = median asking price of
+# active comparable listings, matched by card + grade.
+# Needs EBAY_APP_ID and EBAY_CERT_ID in Streamlit secrets (free dev account).
 # ---------------------------------------------------------------------------
-PRICECHARTING_URL = "https://www.pricecharting.com/api/product"
+EBAY_OAUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
+EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
 
-def price_field_for_grade(grade):
-    g = str(grade).strip()
-    if g == "10":
-        return "manual-only-price"   # PSA 10
-    if g in ("9", "9.5"):
-        return "graded-price"        # PSA 9 (closest available tier)
-    return "loose-price"             # raw / ungraded fallback
+def secret(name):
+    try:
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=6000, show_spinner=False)
+def ebay_token(app_id, cert_id):
+    if not app_id or not cert_id:
+        return None
+    creds = base64.b64encode(f"{app_id}:{cert_id}".encode()).decode()
+    try:
+        resp = requests.post(
+            EBAY_OAUTH_URL,
+            headers={"Authorization": f"Basic {creds}",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            data={"grant_type": "client_credentials",
+                  "scope": "https://api.ebay.com/oauth/api_scope"},
+            timeout=10)
+        return resp.json().get("access_token")
+    except Exception:
+        return None
 
 def build_query(row):
     parts = [str(row.get("Year", "")), str(row.get("Set", "")), str(row.get("subject", ""))]
     cardno = str(row.get("Card Number", "")).strip()
-    if cardno and cardno != "-":
+    if cardno and cardno not in ("-", "nan"):
         parts.append("#" + cardno)
+    grader = str(row.get("Grade Issuer", "")).strip()
+    grade = str(row.get("Grade", "")).strip()
+    if grader and grader not in ("-", "nan") and grade:
+        parts.append(f"{grader} {grade}")
     return " ".join(p for p in parts if p and p not in ("-", "nan")).strip()
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def pricecharting_lookup(query, grade, token):
+def ebay_market_value(query, token):
     if not token or not query:
         return None
     try:
-        resp = requests.get(PRICECHARTING_URL, params={"t": token, "q": query}, timeout=10)
-        data = resp.json()
-        if data.get("status") != "success":
+        resp = requests.get(
+            EBAY_BROWSE_URL,
+            headers={"Authorization": f"Bearer {token}",
+                     "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"},
+            params={"q": query, "limit": 20, "filter": "buyingOptions:{FIXED_PRICE}"},
+            timeout=10)
+        items = resp.json().get("itemSummaries", []) or []
+        prices = []
+        for it in items:
+            p = it.get("price", {})
+            if p.get("currency") == "USD":
+                try:
+                    prices.append(float(p["value"]))
+                except (KeyError, ValueError, TypeError):
+                    pass
+        if not prices:
             return None
-        field = price_field_for_grade(grade)
-        cents = data.get(field) or data.get("graded-price") or data.get("loose-price")
-        if not cents:
-            return None
-        return cents / 100.0
+        prices.sort()
+        n = len(prices)
+        mid = n // 2
+        return prices[mid] if n % 2 else (prices[mid - 1] + prices[mid]) / 2
     except Exception:
         return None
 
@@ -114,7 +141,7 @@ sheet_url = st.sidebar.text_input("Google Sheets URL", placeholder="Paste your G
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
 st.sidebar.markdown("---")
-st.sidebar.info("Fee buffer: 13% | Profit target: 18% | Undervalued trigger: 15% below market value")
+st.sidebar.info("Fee buffer: 13% | Profit target: 18% | Undervalued = listed below market value by the trigger %")
 
 if not sheet_url:
     st.info("Paste your Google Sheets URL in the sidebar to get started.")
@@ -156,19 +183,21 @@ with tab2:
     if active.empty:
         st.info("No items currently listed.")
     else:
-        token = st.secrets.get("PRICECHARTING_TOKEN", "") if hasattr(st, "secrets") else ""
+        token = ebay_token(secret("EBAY_APP_ID"), secret("EBAY_CERT_ID"))
         if token:
-            with st.spinner(f"Fetching live market values from PriceCharting for {len(active)} listings..."):
+            with st.spinner(f"Fetching live eBay market values for {len(active)} listings..."):
                 active["Market Value"] = active.apply(
-                    lambda r: pricecharting_lookup(build_query(r), r["Grade"], token), axis=1)
-            matched = active["Market Value"].notna().sum()
-            # Fall back to PSA Estimate where no PriceCharting match was found.
+                    lambda r: ebay_market_value(build_query(r), token), axis=1)
+            matched = int(active["Market Value"].notna().sum())
             active["Market Value"] = active["Market Value"].fillna(active["PSA Estimate"])
-            st.caption(f"Live market value from PriceCharting for {matched} of {len(active)} listings; the rest fall back to PSA Estimate.")
+            trigger = 20  # asking prices run high vs. final sale, so use a wider margin
+            st.caption(f"Live eBay market value (median of active comps) for {matched} of {len(active)} "
+                       f"listings; the rest fall back to PSA Estimate. Flagging when listed {trigger}%+ below market.")
         else:
             active["Market Value"] = active["PSA Estimate"]
-            st.info("No PriceCharting API key found. Using PSA Estimate as market value. "
-                    "Add PRICECHARTING_TOKEN under the app's Settings -> Secrets to enable live market values.")
+            trigger = 15
+            st.info("No eBay API keys found. Using PSA Estimate as market value. "
+                    "Add EBAY_APP_ID and EBAY_CERT_ID under the app's Settings -> Secrets to enable live eBay values.")
 
         # How far below market value each listing is priced.
         # Positive % = listed below market; negative = listed above market.
@@ -178,7 +207,7 @@ with tab2:
             return 0.0
         active["Under Market %"] = active.apply(under_market, axis=1)
         active["Alert"] = active["Under Market %"].apply(
-            lambda p: "UNDERVALUED" if p >= 15 else "SAFE")
+            lambda p: "UNDERVALUED" if p >= trigger else "SAFE")
         active = active.sort_values("Under Market %", ascending=False)
 
         flagged = active[active["Alert"] == "UNDERVALUED"]
@@ -186,11 +215,11 @@ with tab2:
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Listings", f"{len(active):,}")
-        c2.metric("Below Market (15%+)", f"{len(flagged):,}")
+        c2.metric(f"Below Market ({trigger}%+)", f"{len(flagged):,}")
         c3.metric("Priced OK", f"{len(safe):,}")
 
         if not flagged.empty:
-            st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below market value. Worst offenders are sorted to the top.")
+            st.warning(f"{len(flagged)} of {len(active)} listings are priced {trigger}%+ below market value. Worst offenders are sorted to the top.")
         else:
             st.success("All active listings are within safe market margins.")
         st.dataframe(
