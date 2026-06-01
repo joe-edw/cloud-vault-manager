@@ -41,11 +41,11 @@ def clean_money(series):
 def process(df):
     df = df.rename(columns={"Subject": "subject"})
     for col in ["Year", "Set", "Card Number", "subject", "Variety", "Grade Issuer", "Grade",
-                "My Cost", "PSA Estimate", "Listing Price", "Listing Status",
+                "My Cost", "PSA Estimate", "Card Ladder Value", "Listing Price", "Listing Status",
                 "Sold Status", "Sold Price", "Sold Fees", "Sold Proceeds"]:
         if col not in df.columns:
             df[col] = ""
-    for col in ["My Cost", "PSA Estimate", "Listing Price",
+    for col in ["My Cost", "PSA Estimate", "Card Ladder Value", "Listing Price",
                 "Sold Price", "Sold Fees", "Sold Proceeds"]:
         df[col] = clean_money(df[col])
     df["Grade"] = pd.to_numeric(df["Grade"], errors="coerce")
@@ -183,21 +183,32 @@ with tab2:
     if active.empty:
         st.info("No items currently listed.")
     else:
+        # Resolve market value, best source first: Card Ladder Value > live eBay > PSA Estimate.
+        active["Market Value"] = active["PSA Estimate"]
+        sources = ["PSA Estimate (fallback)"]
+
         token = ebay_token(secret("EBAY_APP_ID"), secret("EBAY_CERT_ID"))
         if token:
             with st.spinner(f"Fetching live eBay market values for {len(active)} listings..."):
-                active["Market Value"] = active.apply(
-                    lambda r: ebay_market_value(build_query(r), token), axis=1)
-            matched = int(active["Market Value"].notna().sum())
-            active["Market Value"] = active["Market Value"].fillna(active["PSA Estimate"])
-            trigger = 20  # asking prices run high vs. final sale, so use a wider margin
-            st.caption(f"Live eBay market value (median of active comps) for {matched} of {len(active)} "
-                       f"listings; the rest fall back to PSA Estimate. Flagging when listed {trigger}%+ below market.")
+                ebay_vals = active.apply(lambda r: ebay_market_value(build_query(r), token), axis=1)
+            ebay_matched = int(ebay_vals.notna().sum())
+            active["Market Value"] = ebay_vals.fillna(active["Market Value"])
+            sources.insert(0, f"eBay asking ({ebay_matched})")
+
+        cl_matched = int((active["Card Ladder Value"] > 0).sum())
+        if cl_matched:
+            active["Market Value"] = active["Card Ladder Value"].where(
+                active["Card Ladder Value"] > 0, active["Market Value"])
+            sources.insert(0, f"Card Ladder ({cl_matched})")
+
+        # Card Ladder & PSA are value-based; eBay asking runs high so needs a wider margin.
+        trigger = 20 if (token and not cl_matched) else 15
+
+        if cl_matched or token:
+            st.caption(f"Market value by source -> {', '.join(sources)}. Flagging when listed {trigger}%+ below market.")
         else:
-            active["Market Value"] = active["PSA Estimate"]
-            trigger = 15
-            st.info("No eBay API keys found. Using PSA Estimate as market value. "
-                    "Add EBAY_APP_ID and EBAY_CERT_ID under the app's Settings -> Secrets to enable live eBay values.")
+            st.info("Using PSA Estimate as market value. Add a 'Card Ladder Value' column to your Google Sheet "
+                    "(e.g. from Card Ladder's portfolio CSV export) to switch the benchmark to Card Ladder.")
 
         # How far below market value each listing is priced.
         # Positive % = listed below market; negative = listed above market.
@@ -224,10 +235,11 @@ with tab2:
             st.success("All active listings are within safe market margins.")
         st.dataframe(
             active[["Alert", "Under Market %", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                    "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "Market Value", "PSA Estimate"]]
+                    "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "Market Value",
+                    "Card Ladder Value", "PSA Estimate"]]
             .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Target Price": MONEY,
-                           "Listing Price": MONEY, "Market Value": MONEY, "PSA Estimate": MONEY,
-                           "Under Market %": "{:.0f}%"})
+                           "Listing Price": MONEY, "Market Value": MONEY, "Card Ladder Value": MONEY,
+                           "PSA Estimate": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
 
