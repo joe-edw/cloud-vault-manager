@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import requests
 
 st.set_page_config(page_title="Cloud Vault Manager", layout="wide")
 
@@ -38,7 +39,7 @@ def clean_money(series):
 
 def process(df):
     df = df.rename(columns={"Subject": "subject"})
-    for col in ["Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
+    for col in ["Year", "Set", "Card Number", "subject", "Variety", "Grade Issuer", "Grade",
                 "My Cost", "PSA Estimate", "Listing Price", "Listing Status",
                 "Sold Status", "Sold Price", "Sold Fees", "Sold Proceeds"]:
         if col not in df.columns:
@@ -47,7 +48,7 @@ def process(df):
                 "Sold Price", "Sold Fees", "Sold Proceeds"]:
         df[col] = clean_money(df[col])
     df["Grade"] = pd.to_numeric(df["Grade"], errors="coerce")
-    df["Grade"] = df["Grade"].apply(lambda x: str(int(x)) if pd.notna(x) else "")
+    df["Grade"] = df["Grade"].apply(lambda x: str(int(x)) if pd.notna(x) and x == int(x) else (str(x) if pd.notna(x) else ""))
     df["Listing Status"] = df["Listing Status"].astype(str).str.strip()
     df["Sold Status"] = df["Sold Status"].astype(str).str.strip()
     df["Variety"] = df["Variety"].astype(str).str.strip().replace("-", "")
@@ -59,6 +60,51 @@ def row_highlight(row):
     color = "background-color: #ffe699" if row["Alert"] == "UNDERVALUED" else ""
     return [color] * len(row)
 
+# ---------------------------------------------------------------------------
+# PriceCharting live market value
+# PriceCharting reuses video-game field names for cards. Mapping (verify in
+# their API docs once your key is live):
+#   loose-price       -> Ungraded / raw
+#   graded-price      -> PSA 9
+#   manual-only-price -> PSA 10
+#   box-only-price    -> BGS 9.5
+#   bgs-10-price      -> BGS 10
+# Prices are returned in pennies (integer).
+# ---------------------------------------------------------------------------
+PRICECHARTING_URL = "https://www.pricecharting.com/api/product"
+
+def price_field_for_grade(grade):
+    g = str(grade).strip()
+    if g == "10":
+        return "manual-only-price"   # PSA 10
+    if g in ("9", "9.5"):
+        return "graded-price"        # PSA 9 (closest available tier)
+    return "loose-price"             # raw / ungraded fallback
+
+def build_query(row):
+    parts = [str(row.get("Year", "")), str(row.get("Set", "")), str(row.get("subject", ""))]
+    cardno = str(row.get("Card Number", "")).strip()
+    if cardno and cardno != "-":
+        parts.append("#" + cardno)
+    return " ".join(p for p in parts if p and p not in ("-", "nan")).strip()
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def pricecharting_lookup(query, grade, token):
+    if not token or not query:
+        return None
+    try:
+        resp = requests.get(PRICECHARTING_URL, params={"t": token, "q": query}, timeout=10)
+        data = resp.json()
+        if data.get("status") != "success":
+            return None
+        field = price_field_for_grade(grade)
+        cents = data.get(field) or data.get("graded-price") or data.get("loose-price")
+        if not cents:
+            return None
+        return cents / 100.0
+    except Exception:
+        return None
+
 MONEY = "${:,.2f}"
 PCT = "{:.1f}%"
 
@@ -68,7 +114,7 @@ sheet_url = st.sidebar.text_input("Google Sheets URL", placeholder="Paste your G
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
 st.sidebar.markdown("---")
-st.sidebar.info("Fee buffer: 13% | Profit target: 18% | Undervalued trigger: 15% below PSA Estimate")
+st.sidebar.info("Fee buffer: 13% | Profit target: 18% | Undervalued trigger: 15% below market value")
 
 if not sheet_url:
     st.info("Paste your Google Sheets URL in the sidebar to get started.")
@@ -110,11 +156,25 @@ with tab2:
     if active.empty:
         st.info("No items currently listed.")
     else:
-        # How far below market value (PSA Estimate) each listing is priced.
+        token = st.secrets.get("PRICECHARTING_TOKEN", "") if hasattr(st, "secrets") else ""
+        if token:
+            with st.spinner(f"Fetching live market values from PriceCharting for {len(active)} listings..."):
+                active["Market Value"] = active.apply(
+                    lambda r: pricecharting_lookup(build_query(r), r["Grade"], token), axis=1)
+            matched = active["Market Value"].notna().sum()
+            # Fall back to PSA Estimate where no PriceCharting match was found.
+            active["Market Value"] = active["Market Value"].fillna(active["PSA Estimate"])
+            st.caption(f"Live market value from PriceCharting for {matched} of {len(active)} listings; the rest fall back to PSA Estimate.")
+        else:
+            active["Market Value"] = active["PSA Estimate"]
+            st.info("No PriceCharting API key found. Using PSA Estimate as market value. "
+                    "Add PRICECHARTING_TOKEN under the app's Settings -> Secrets to enable live market values.")
+
+        # How far below market value each listing is priced.
         # Positive % = listed below market; negative = listed above market.
         def under_market(r):
-            if r["PSA Estimate"] > 0:
-                return (r["PSA Estimate"] - r["Listing Price"]) / r["PSA Estimate"] * 100
+            if r["Market Value"] > 0:
+                return (r["Market Value"] - r["Listing Price"]) / r["Market Value"] * 100
             return 0.0
         active["Under Market %"] = active.apply(under_market, axis=1)
         active["Alert"] = active["Under Market %"].apply(
@@ -130,14 +190,15 @@ with tab2:
         c3.metric("Priced OK", f"{len(safe):,}")
 
         if not flagged.empty:
-            st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below their PSA Estimate (market value). Worst offenders are sorted to the top.")
+            st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below market value. Worst offenders are sorted to the top.")
         else:
             st.success("All active listings are within safe market margins.")
         st.dataframe(
             active[["Alert", "Under Market %", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                    "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "PSA Estimate"]]
+                    "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "Market Value", "PSA Estimate"]]
             .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Target Price": MONEY,
-                           "Listing Price": MONEY, "PSA Estimate": MONEY, "Under Market %": "{:.0f}%"})
+                           "Listing Price": MONEY, "Market Value": MONEY, "PSA Estimate": MONEY,
+                           "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
 
