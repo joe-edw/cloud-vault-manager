@@ -120,6 +120,23 @@ def secret(name):
     except Exception:
         return ""
 
+def check_password():
+    # Password gate. If no APP_PASSWORD secret is set, the app stays open.
+    expected = secret("APP_PASSWORD")
+    if not expected:
+        return True
+    if st.session_state.get("auth_ok"):
+        return True
+    with st.form("login"):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Enter")
+    if submitted:
+        if pw == expected:
+            st.session_state["auth_ok"] = True
+            return True
+        st.error("Incorrect password")
+    return False
+
 @st.cache_data(ttl=6000, show_spinner=False)
 def ebay_token(app_id, cert_id):
     if not app_id or not cert_id:
@@ -181,8 +198,11 @@ MONEY = "${:,.2f}"
 PCT = "{:.1f}%"
 
 st.title("Cloud Vault Manager")
+if not check_password():
+    st.stop()
 st.sidebar.header("Data Source")
-sheet_url = st.sidebar.text_input("Google Sheets URL", placeholder="Paste your Google Sheets link here...")
+sheet_url = st.sidebar.text_input("Google Sheets URL", value=secret("SHEET_URL"),
+                                  placeholder="Paste your Google Sheets link here...")
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
 st.sidebar.markdown("---")
