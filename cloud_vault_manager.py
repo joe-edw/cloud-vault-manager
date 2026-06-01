@@ -11,10 +11,11 @@ def break_even(cost):
 def target_price(be):
     return be * 1.18
 
-def suggested_list(market_value, cost, premium_pct):
-    # Modest premium above market value, proportional to the card's value.
-    # Floored at the break-even price (cost / 0.87) so the post-fee bottom line never goes negative.
-    by_market = market_value * (1 + premium_pct / 100.0)
+def suggested_list(market_value, cost, premium_pct, catchup_rate=0.0):
+    # Modest premium above market value (proportional to the card's value), plus an optional
+    # catch-up surcharge (also proportional to market value) to recover prior portfolio losses.
+    # Floored at the break-even price (cost / 0.87) so the post-fee line never goes negative.
+    by_market = market_value * (1 + premium_pct / 100.0 + catchup_rate)
     return max(by_market, break_even(cost))
 
 def is_hold(market_value, cost, premium_pct):
@@ -185,6 +186,9 @@ if st.sidebar.button("Refresh Data"):
 st.sidebar.markdown("---")
 premium_pct = st.sidebar.slider("Listing premium above market value (%)", 0, 30, 10,
                                 help="Suggested List = Market Value x (1 + this %), never below break-even.")
+recover = st.sidebar.checkbox("Recover past losses (catch-up billing)", value=True,
+                              help="Spread prior realized net losses across listable inventory, proportional to "
+                                   "market value, so the total bottom line (incl. past sales) returns to positive.")
 st.sidebar.info("Fee buffer: 13% | Market value = Card Ladder | Suggested List keeps a positive post-fee margin")
 
 if not sheet_url:
@@ -197,6 +201,46 @@ if raw is None:
 
 df = process(raw)
 
+# ---------------------------------------------------------------------------
+# Portfolio bottom line + loss-recovery (catch-up billing)
+# ---------------------------------------------------------------------------
+def realized_pnl(d):
+    s = d[d["Sold Status"].str.lower() == "sold"]
+    payout = s["Sold Proceeds"].where(s["Sold Proceeds"] > 0, s["Sold Price"] * 0.87)
+    return float((payout - s["My Cost"]).sum())
+
+def listable_mask(d):
+    active_m = ((d["Listing Status"] == "Fixed Price")
+                & (~d["Sold Status"].str.lower().isin(["sold", "processing payout"]))
+                & (d["Sold Price"] == 0))
+    return active_m | d["Listing Status"].isin(["-", "", "nan"])
+
+realized = realized_pnl(df)
+deficit = max(0.0, -realized)
+pool = df[listable_mask(df)].copy()
+pool = pool[~pool.apply(lambda r: is_hold(r["Market Value"], r["My Cost"], premium_pct), axis=1)]
+pool_mv = float(pool["Market Value"].sum())
+# Gross up by the fee so the NET amount recovered equals the deficit.
+catchup_rate = (deficit / 0.87) / pool_mv if (recover and deficit > 0 and pool_mv > 0) else 0.0
+
+def proj_net(r):
+    cu = 0.0 if is_hold(r["Market Value"], r["My Cost"], premium_pct) else catchup_rate
+    return suggested_list(r["Market Value"], r["My Cost"], premium_pct, cu) * 0.87 - r["My Cost"]
+pool_proj_net = float(pool.apply(proj_net, axis=1).sum()) if len(pool) else 0.0
+
+st.subheader("Portfolio Bottom Line")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Realized P&L (sold)", f"${realized:,.2f}")
+m2.metric("Catch-up Surcharge", f"{catchup_rate*100:.0f}%")
+m3.metric("Proj. Net (if pool sells)", f"${pool_proj_net:,.2f}")
+m4.metric("Total Bottom Line", f"${realized + pool_proj_net:,.2f}")
+if catchup_rate > 0:
+    st.caption(f"Recovering ${deficit:,.2f} of past losses by adding {catchup_rate*100:.0f}% "
+               f"(proportional to market value) across {len(pool)} listable cards, on top of the {premium_pct}% premium. "
+               f"High catch-up markups may slow sell-through - lower the premium or uncheck catch-up to prioritize sales.")
+elif deficit > 0:
+    st.caption(f"Past realized loss of ${deficit:,.2f} is NOT being recovered in pricing (catch-up off).")
+
 tab1, tab2, tab3 = st.tabs(["Unlisted Vault", "Active eBay Listings", "Sold History"])
 
 with tab1:
@@ -208,7 +252,8 @@ with tab1:
         unlisted["Action"] = unlisted.apply(
             lambda r: "HOLD" if is_hold(r["Market Value"], r["My Cost"], premium_pct) else "LIST", axis=1)
         unlisted["Suggested List"] = unlisted.apply(
-            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
+            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct,
+                                     0.0 if r["Action"] == "HOLD" else catchup_rate), axis=1)
         unlisted["Proj Net"] = unlisted["Suggested List"] * 0.87 - unlisted["My Cost"]
         listable = unlisted[unlisted["Action"] == "LIST"]
         c1, c2, c3, c4 = st.columns(4)
@@ -244,7 +289,8 @@ with tab2:
             lambda r: (r["Market Value"] - r["Listing Price"]) / r["Market Value"] * 100 if r["Market Value"] > 0 else 0.0,
             axis=1)
         active["Suggested List"] = active.apply(
-            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
+            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct,
+                                     0.0 if is_hold(r["Market Value"], r["My Cost"], premium_pct) else catchup_rate), axis=1)
         active["Proj Net"] = active["Suggested List"] * 0.87 - active["My Cost"]
         active["Alert"] = active.apply(
             lambda r: "HOLD" if is_hold(r["Market Value"], r["My Cost"], premium_pct)
