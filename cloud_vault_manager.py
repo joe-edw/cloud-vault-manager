@@ -104,19 +104,34 @@ with tab2:
     if active.empty:
         st.info("No items currently listed.")
     else:
-        active["Alert"] = active.apply(
-            lambda r: "UNDERVALUED" if r["Listing Price"] <= (r["PSA Estimate"] * 0.85) and r["PSA Estimate"] > 0 else "SAFE",
-            axis=1)
+        # How far below market value (PSA Estimate) each listing is priced.
+        # Positive % = listed below market; negative = listed above market.
+        def under_market(r):
+            if r["PSA Estimate"] > 0:
+                return (r["PSA Estimate"] - r["Listing Price"]) / r["PSA Estimate"] * 100
+            return 0.0
+        active["Under Market %"] = active.apply(under_market, axis=1)
+        active["Alert"] = active["Under Market %"].apply(
+            lambda p: "UNDERVALUED" if p >= 15 else "SAFE")
+        active = active.sort_values("Under Market %", ascending=False)
+
         flagged = active[active["Alert"] == "UNDERVALUED"]
+        safe = active[active["Alert"] == "SAFE"]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Active Listings", f"{len(active):,}")
+        c2.metric("Below Market (15%+)", f"{len(flagged):,}")
+        c3.metric("Priced OK", f"{len(safe):,}")
+
         if not flagged.empty:
-            st.error(f"CRITICAL ALERT: {len(flagged)} listing(s) are 15%+ below PSA Estimate!")
+            st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below their PSA Estimate (market value). Worst offenders are sorted to the top.")
         else:
             st.success("All active listings are within safe market margins.")
         st.dataframe(
-            active[["Alert", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
+            active[["Alert", "Under Market %", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
                     "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "PSA Estimate"]]
             .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Target Price": MONEY,
-                           "Listing Price": MONEY, "PSA Estimate": MONEY})
+                           "Listing Price": MONEY, "PSA Estimate": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
 
