@@ -273,13 +273,15 @@ with tab1:
         c2.metric("Ready to List", f"{len(listable):,}")
         c3.metric("Hold (underwater)", f"{(unlisted['Action'] == 'HOLD').sum():,}")
         c4.metric("Proj. Net (listable)", f"${listable['Proj Net'].sum():,.2f}")
+        view = unlisted[["Action", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
+                         "My Cost", "Break-Even Floor", "Market Value", "Suggested List", "Proj Net"]]
         st.dataframe(
-            unlisted[["Action", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                      "My Cost", "Break-Even Floor", "Market Value", "Suggested List", "Proj Net"]]
-            .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Market Value": MONEY,
-                           "Suggested List": MONEY, "Proj Net": MONEY})
+            view.style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Market Value": MONEY,
+                               "Suggested List": MONEY, "Proj Net": MONEY})
             .apply(row_highlight, axis=1),
             use_container_width=True)
+        st.download_button("Download this view (CSV)", view.to_csv(index=False),
+                           "unlisted_vault.csv", "text/csv", key="dl_unlisted")
 
 with tab2:
     st.subheader("Active Monitoring: Undervalued Alert Scanner")
@@ -326,13 +328,15 @@ with tab2:
         if not hold.empty:
             st.info(f"{len(hold)} active listing(s) are below break-even at market (red rows) - "
                     f"consider delisting and holding until Card Ladder value recovers.")
+        view = active[["Alert", "Under Market %", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
+                       "My Cost", "Listing Price", "Market Value", "Suggested List", "Proj Net"]]
         st.dataframe(
-            active[["Alert", "Under Market %", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                    "My Cost", "Listing Price", "Market Value", "Suggested List", "Proj Net"]]
-            .style.format({"My Cost": MONEY, "Listing Price": MONEY, "Market Value": MONEY,
-                           "Suggested List": MONEY, "Proj Net": MONEY, "Under Market %": "{:.0f}%"})
+            view.style.format({"My Cost": MONEY, "Listing Price": MONEY, "Market Value": MONEY,
+                               "Suggested List": MONEY, "Proj Net": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
+        st.download_button("Download this view (CSV)", view.to_csv(index=False),
+                           "active_listings.csv", "text/csv", key="dl_active")
 
 with tab3:
     st.subheader("Performance Tracking: Realised Returns")
@@ -349,8 +353,10 @@ with tab3:
         c3.metric("Net Payout Out", f"${sold['Net Payout'].sum():,.2f}")
         c4.metric("Net Profit", f"${sold['Net Profit'].sum():,.2f}")
         c5.metric("Avg ROI", f"{sold['ROI %'].mean():.1f}%")
+        view = sold[["Cert Number", "subject", "My Cost", "Sold Price", "Sold Fees", "Net Payout", "Net Profit", "ROI %"]]
         st.dataframe(
-            sold[["Cert Number", "subject", "My Cost", "Sold Price", "Sold Fees", "Net Payout", "Net Profit", "ROI %"]]
-            .style.format({"My Cost": MONEY, "Sold Price": MONEY, "Sold Fees": MONEY,
-                           "Net Payout": MONEY, "Net Profit": MONEY, "ROI %": PCT}),
+            view.style.format({"My Cost": MONEY, "Sold Price": MONEY, "Sold Fees": MONEY,
+                               "Net Payout": MONEY, "Net Profit": MONEY, "ROI %": PCT}),
             use_container_width=True)
+        st.download_button("Download this view (CSV)", view.to_csv(index=False),
+                           "sold_history.csv", "text/csv", key="dl_sold")
