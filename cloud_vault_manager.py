@@ -189,6 +189,9 @@ premium_pct = st.sidebar.slider("Listing premium above market value (%)", 0, 30,
 recover = st.sidebar.checkbox("Recover past losses (catch-up billing)", value=True,
                               help="Spread prior realized net losses across listable inventory, proportional to "
                                    "market value, so the total bottom line (incl. past sales) returns to positive.")
+cap_pct = st.sidebar.slider("Max total markup over market (%)", premium_pct, 60, max(premium_pct, 20),
+                            help="Caps how far above market value the premium + catch-up can push a price, "
+                                 "to protect sell-through. Catch-up uses whatever room is left under this cap.")
 st.sidebar.info("Fee buffer: 13% | Market value = Card Ladder | Suggested List keeps a positive post-fee margin")
 
 if not sheet_url:
@@ -220,8 +223,12 @@ deficit = max(0.0, -realized)
 pool = df[listable_mask(df)].copy()
 pool = pool[~pool.apply(lambda r: is_hold(r["Market Value"], r["My Cost"], premium_pct), axis=1)]
 pool_mv = float(pool["Market Value"].sum())
-# Gross up by the fee so the NET amount recovered equals the deficit.
-catchup_rate = (deficit / 0.87) / pool_mv if (recover and deficit > 0 and pool_mv > 0) else 0.0
+# Full catch-up that would recover the entire deficit (grossed up for the fee)...
+full_rate = (deficit / 0.87) / pool_mv if (deficit > 0 and pool_mv > 0) else 0.0
+# ...capped by the room left under the max total markup, to protect sell-through.
+cap_gap = max(0.0, cap_pct / 100.0 - premium_pct / 100.0)
+catchup_rate = min(full_rate, cap_gap) if (recover and deficit > 0) else 0.0
+recovered = pool_mv * catchup_rate * 0.87
 
 def proj_net(r):
     cu = 0.0 if is_hold(r["Market Value"], r["My Cost"], premium_pct) else catchup_rate
@@ -231,13 +238,17 @@ pool_proj_net = float(pool.apply(proj_net, axis=1).sum()) if len(pool) else 0.0
 st.subheader("Portfolio Bottom Line")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Realized P&L (sold)", f"${realized:,.2f}")
-m2.metric("Catch-up Surcharge", f"{catchup_rate*100:.0f}%")
+m2.metric("Catch-up Applied", f"{catchup_rate*100:.0f}%")
 m3.metric("Proj. Net (if pool sells)", f"${pool_proj_net:,.2f}")
 m4.metric("Total Bottom Line", f"${realized + pool_proj_net:,.2f}")
-if catchup_rate > 0:
-    st.caption(f"Recovering ${deficit:,.2f} of past losses by adding {catchup_rate*100:.0f}% "
-               f"(proportional to market value) across {len(pool)} listable cards, on top of the {premium_pct}% premium. "
-               f"High catch-up markups may slow sell-through - lower the premium or uncheck catch-up to prioritize sales.")
+if recover and deficit > 0 and catchup_rate > 0:
+    if catchup_rate < full_rate - 1e-9:
+        st.caption(f"Catch-up capped at {cap_pct}% total markup: recovering ${recovered:,.2f} of the "
+                   f"${deficit:,.2f} loss across this pool (remaining ${deficit - recovered:,.2f} keeps recovering "
+                   f"as you sell and relist). Raise the cap for faster recovery, lower it for better sell-through.")
+    else:
+        st.caption(f"Recovering the full ${deficit:,.2f} loss via a {catchup_rate*100:.0f}% catch-up across "
+                   f"{len(pool)} cards. Heads-up: markups this high may slow sell-through.")
 elif deficit > 0:
     st.caption(f"Past realized loss of ${deficit:,.2f} is NOT being recovered in pricing (catch-up off).")
 
