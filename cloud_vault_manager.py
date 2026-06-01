@@ -295,6 +295,8 @@ with tab1:
         c2.metric("Ready to List", f"{len(listable):,}")
         c3.metric("Hold (underwater)", f"{(unlisted['Action'] == 'HOLD').sum():,}")
         c4.metric("Proj. Net (listable)", f"${listable['Proj Net'].sum():,.2f}")
+        st.caption("Row key:  🔴 HOLD = market is below your break-even, don't list yet  ·  "
+                   "⬜ LIST = ready to list at Suggested List")
         view = unlisted[["Action", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
                          "My Cost", "Break-Even Floor", "Market Value", "Suggested List", "Proj Net"]]
         st.dataframe(
@@ -351,6 +353,8 @@ with tab2:
         if not hold.empty:
             st.info(f"{len(hold)} active listing(s) are below break-even at market (red rows) - "
                     f"consider delisting and holding until Card Ladder value recovers.")
+        st.caption("Row key:  🟡 UNDERVALUED = listed 15%+ below market, reprice up to Suggested List  ·  "
+                   "🔴 HOLD = market below break-even, consider delisting  ·  ⬜ SAFE = priced OK")
         view = active[["Alert", "Under Market %", "Cert Number", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
                        "My Cost", "Listing Price", "Market Value", "Suggested List", "Proj Net"]]
         st.dataframe(
