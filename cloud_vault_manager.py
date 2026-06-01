@@ -11,6 +11,12 @@ def break_even(cost):
 def target_price(be):
     return be * 1.18
 
+def suggested_list(market_value, cost, premium_pct):
+    # Modest premium above market value, proportional to the card's value.
+    # Floored at the break-even price (cost / 0.87) so the post-fee bottom line never goes negative.
+    by_market = market_value * (1 + premium_pct / 100.0)
+    return max(by_market, break_even(cost))
+
 def to_csv_url(url):
     if not url:
         return None
@@ -77,6 +83,9 @@ def process(df):
     if cl_map and "Cert Number" in df.columns:
         df["Card Ladder Value"] = df["Cert Number"].map(
             lambda c: cl_map.get(norm_cert(c), 0.0))
+
+    # Canonical market value: Card Ladder where available, else PSA Estimate.
+    df["Market Value"] = df["Card Ladder Value"].where(df["Card Ladder Value"] > 0, df["PSA Estimate"])
     return df
 
 def row_highlight(row):
@@ -163,7 +172,9 @@ sheet_url = st.sidebar.text_input("Google Sheets URL", placeholder="Paste your G
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
 st.sidebar.markdown("---")
-st.sidebar.info("Fee buffer: 13% | Profit target: 18% | Undervalued = listed below market value by the trigger %")
+premium_pct = st.sidebar.slider("Listing premium above market value (%)", 0, 30, 10,
+                                help="Suggested List = Market Value x (1 + this %), never below break-even.")
+st.sidebar.info("Fee buffer: 13% | Market value = Card Ladder | Suggested List keeps a positive post-fee margin")
 
 if not sheet_url:
     st.info("Paste your Google Sheets URL in the sidebar to get started.")
@@ -183,14 +194,19 @@ with tab1:
     if unlisted.empty:
         st.info("No unlisted items found.")
     else:
-        c1, c2, c3 = st.columns(3)
+        unlisted["Suggested List"] = unlisted.apply(
+            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
+        unlisted["Proj Net"] = unlisted["Suggested List"] * 0.87 - unlisted["My Cost"]
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Vault Count", f"{len(unlisted):,}")
         c2.metric("Total Cost", f"${unlisted['My Cost'].sum():,.2f}")
-        c3.metric("Target Value", f"${unlisted['Target Price'].sum():,.2f}")
+        c3.metric("Suggested List Total", f"${unlisted['Suggested List'].sum():,.2f}")
+        c4.metric("Proj. Net Profit", f"${unlisted['Proj Net'].sum():,.2f}")
         st.dataframe(
             unlisted[["Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                      "My Cost", "Break-Even Floor", "Target Price"]]
-            .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Target Price": MONEY}),
+                      "My Cost", "Break-Even Floor", "Market Value", "Suggested List", "Proj Net"]]
+            .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Market Value": MONEY,
+                           "Suggested List": MONEY, "Proj Net": MONEY}),
             use_container_width=True)
 
 with tab2:
@@ -205,63 +221,36 @@ with tab2:
     if active.empty:
         st.info("No items currently listed.")
     else:
-        # Resolve market value, best source first: Card Ladder Value > live eBay > PSA Estimate.
-        active["Market Value"] = active["PSA Estimate"]
-        sources = ["PSA Estimate (fallback)"]
-
-        token = ebay_token(secret("EBAY_APP_ID"), secret("EBAY_CERT_ID"))
-        if token:
-            with st.spinner(f"Fetching live eBay market values for {len(active)} listings..."):
-                ebay_vals = active.apply(lambda r: ebay_market_value(build_query(r), token), axis=1)
-            ebay_matched = int(ebay_vals.notna().sum())
-            active["Market Value"] = ebay_vals.fillna(active["Market Value"])
-            sources.insert(0, f"eBay asking ({ebay_matched})")
-
         cl_matched = int((active["Card Ladder Value"] > 0).sum())
-        if cl_matched:
-            active["Market Value"] = active["Card Ladder Value"].where(
-                active["Card Ladder Value"] > 0, active["Market Value"])
-            sources.insert(0, f"Card Ladder ({cl_matched})")
+        st.caption(f"Market value = Card Ladder for {cl_matched} of {len(active)} listings (rest fall back to PSA Estimate). "
+                   f"Suggested List = market x (1 + {premium_pct}% premium), floored at break-even so Proj Net stays >= 0.")
 
-        # Card Ladder & PSA are value-based; eBay asking runs high so needs a wider margin.
-        trigger = 20 if (token and not cl_matched) else 15
-
-        if cl_matched or token:
-            st.caption(f"Market value by source -> {', '.join(sources)}. Flagging when listed {trigger}%+ below market.")
-        else:
-            st.info("Using PSA Estimate as market value. Add a 'Card Ladder Value' column to your Google Sheet "
-                    "(e.g. from Card Ladder's portfolio CSV export) to switch the benchmark to Card Ladder.")
-
-        # How far below market value each listing is priced.
-        # Positive % = listed below market; negative = listed above market.
-        def under_market(r):
-            if r["Market Value"] > 0:
-                return (r["Market Value"] - r["Listing Price"]) / r["Market Value"] * 100
-            return 0.0
-        active["Under Market %"] = active.apply(under_market, axis=1)
-        active["Alert"] = active["Under Market %"].apply(
-            lambda p: "UNDERVALUED" if p >= trigger else "SAFE")
+        active["Under Market %"] = active.apply(
+            lambda r: (r["Market Value"] - r["Listing Price"]) / r["Market Value"] * 100 if r["Market Value"] > 0 else 0.0,
+            axis=1)
+        active["Alert"] = active["Under Market %"].apply(lambda p: "UNDERVALUED" if p >= 15 else "SAFE")
+        active["Suggested List"] = active.apply(
+            lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
+        active["Proj Net"] = active["Suggested List"] * 0.87 - active["My Cost"]
         active = active.sort_values("Under Market %", ascending=False)
 
         flagged = active[active["Alert"] == "UNDERVALUED"]
-        safe = active[active["Alert"] == "SAFE"]
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Active Listings", f"{len(active):,}")
-        c2.metric(f"Below Market ({trigger}%+)", f"{len(flagged):,}")
-        c3.metric("Priced OK", f"{len(safe):,}")
+        c2.metric("Below Market (15%+)", f"{len(flagged):,}")
+        c3.metric("Priced OK", f"{len(active) - len(flagged):,}")
 
         if not flagged.empty:
-            st.warning(f"{len(flagged)} of {len(active)} listings are priced {trigger}%+ below market value. Worst offenders are sorted to the top.")
+            st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below Card Ladder market value. "
+                       f"Compare 'Listing Price' to 'Suggested List' to reprice. Worst offenders sorted to top.")
         else:
             st.success("All active listings are within safe market margins.")
         st.dataframe(
             active[["Alert", "Under Market %", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
-                    "My Cost", "Break-Even Floor", "Target Price", "Listing Price", "Market Value",
-                    "Card Ladder Value", "PSA Estimate"]]
-            .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Target Price": MONEY,
-                           "Listing Price": MONEY, "Market Value": MONEY, "Card Ladder Value": MONEY,
-                           "PSA Estimate": MONEY, "Under Market %": "{:.0f}%"})
+                    "My Cost", "Listing Price", "Market Value", "Suggested List", "Proj Net"]]
+            .style.format({"My Cost": MONEY, "Listing Price": MONEY, "Market Value": MONEY,
+                           "Suggested List": MONEY, "Proj Net": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
             use_container_width=True)
 
