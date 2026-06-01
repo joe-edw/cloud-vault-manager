@@ -17,6 +17,11 @@ def suggested_list(market_value, cost, premium_pct):
     by_market = market_value * (1 + premium_pct / 100.0)
     return max(by_market, break_even(cost))
 
+def is_hold(market_value, cost, premium_pct):
+    # "Underwater": a market-competitive price (market + premium) can't even cover break-even,
+    # so listing now would mean either a loss or pricing so far above market it won't sell. Hold instead.
+    return market_value > 0 and market_value * (1 + premium_pct / 100.0) < break_even(cost)
+
 def to_csv_url(url):
     if not url:
         return None
@@ -89,7 +94,13 @@ def process(df):
     return df
 
 def row_highlight(row):
-    color = "background-color: #ffe699" if row["Alert"] == "UNDERVALUED" else ""
+    status = row.get("Alert", row.get("Action", ""))
+    if status == "UNDERVALUED":
+        color = "background-color: #ffe699"   # yellow: listed below market, reprice up
+    elif status == "HOLD":
+        color = "background-color: #f8d7da"   # red: market below break-even, don't list
+    else:
+        color = ""
     return [color] * len(row)
 
 # ---------------------------------------------------------------------------
@@ -194,19 +205,23 @@ with tab1:
     if unlisted.empty:
         st.info("No unlisted items found.")
     else:
+        unlisted["Action"] = unlisted.apply(
+            lambda r: "HOLD" if is_hold(r["Market Value"], r["My Cost"], premium_pct) else "LIST", axis=1)
         unlisted["Suggested List"] = unlisted.apply(
             lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
         unlisted["Proj Net"] = unlisted["Suggested List"] * 0.87 - unlisted["My Cost"]
+        listable = unlisted[unlisted["Action"] == "LIST"]
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Vault Count", f"{len(unlisted):,}")
-        c2.metric("Total Cost", f"${unlisted['My Cost'].sum():,.2f}")
-        c3.metric("Suggested List Total", f"${unlisted['Suggested List'].sum():,.2f}")
-        c4.metric("Proj. Net Profit", f"${unlisted['Proj Net'].sum():,.2f}")
+        c2.metric("Ready to List", f"{len(listable):,}")
+        c3.metric("Hold (underwater)", f"{(unlisted['Action'] == 'HOLD').sum():,}")
+        c4.metric("Proj. Net (listable)", f"${listable['Proj Net'].sum():,.2f}")
         st.dataframe(
-            unlisted[["Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
+            unlisted[["Action", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
                       "My Cost", "Break-Even Floor", "Market Value", "Suggested List", "Proj Net"]]
             .style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Market Value": MONEY,
-                           "Suggested List": MONEY, "Proj Net": MONEY}),
+                           "Suggested List": MONEY, "Proj Net": MONEY})
+            .apply(row_highlight, axis=1),
             use_container_width=True)
 
 with tab2:
@@ -228,24 +243,31 @@ with tab2:
         active["Under Market %"] = active.apply(
             lambda r: (r["Market Value"] - r["Listing Price"]) / r["Market Value"] * 100 if r["Market Value"] > 0 else 0.0,
             axis=1)
-        active["Alert"] = active["Under Market %"].apply(lambda p: "UNDERVALUED" if p >= 15 else "SAFE")
         active["Suggested List"] = active.apply(
             lambda r: suggested_list(r["Market Value"], r["My Cost"], premium_pct), axis=1)
         active["Proj Net"] = active["Suggested List"] * 0.87 - active["My Cost"]
+        active["Alert"] = active.apply(
+            lambda r: "HOLD" if is_hold(r["Market Value"], r["My Cost"], premium_pct)
+            else ("UNDERVALUED" if r["Under Market %"] >= 15 else "SAFE"), axis=1)
         active = active.sort_values("Under Market %", ascending=False)
 
         flagged = active[active["Alert"] == "UNDERVALUED"]
+        hold = active[active["Alert"] == "HOLD"]
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Active Listings", f"{len(active):,}")
         c2.metric("Below Market (15%+)", f"{len(flagged):,}")
-        c3.metric("Priced OK", f"{len(active) - len(flagged):,}")
+        c3.metric("Priced OK", f"{len(active) - len(flagged) - len(hold):,}")
+        c4.metric("Hold (underwater)", f"{len(hold):,}")
 
         if not flagged.empty:
             st.warning(f"{len(flagged)} of {len(active)} listings are priced 15%+ below Card Ladder market value. "
                        f"Compare 'Listing Price' to 'Suggested List' to reprice. Worst offenders sorted to top.")
         else:
             st.success("All active listings are within safe market margins.")
+        if not hold.empty:
+            st.info(f"{len(hold)} active listing(s) are below break-even at market (red rows) - "
+                    f"consider delisting and holding until Card Ladder value recovers.")
         st.dataframe(
             active[["Alert", "Under Market %", "Year", "Set", "subject", "Variety", "Grade Issuer", "Grade",
                     "My Cost", "Listing Price", "Market Value", "Suggested List", "Proj Net"]]
