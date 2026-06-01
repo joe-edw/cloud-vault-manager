@@ -303,7 +303,7 @@ with tab1:
             view.style.format({"My Cost": MONEY, "Break-Even Floor": MONEY, "Market Value": MONEY,
                                "Suggested List": MONEY, "Proj Net": MONEY})
             .apply(row_highlight, axis=1),
-            use_container_width=True)
+            width="stretch")
         exports["Unlisted Vault"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "unlisted_vault.csv", "text/csv", key="dl_unlisted")
@@ -361,7 +361,7 @@ with tab2:
             view.style.format({"My Cost": MONEY, "Listing Price": MONEY, "Market Value": MONEY,
                                "Suggested List": MONEY, "Proj Net": MONEY, "Under Market %": "{:.0f}%"})
             .apply(row_highlight, axis=1),
-            use_container_width=True)
+            width="stretch")
         exports["Active eBay Listings"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "active_listings.csv", "text/csv", key="dl_active")
@@ -385,7 +385,7 @@ with tab3:
         st.dataframe(
             view.style.format({"My Cost": MONEY, "Sold Price": MONEY, "Sold Fees": MONEY,
                                "Net Payout": MONEY, "Net Profit": MONEY, "ROI %": PCT}),
-            use_container_width=True)
+            width="stretch")
         exports["Sold History"] = view
         st.download_button("Download this view (CSV)", view.to_csv(index=False),
                            "sold_history.csv", "text/csv", key="dl_sold")
