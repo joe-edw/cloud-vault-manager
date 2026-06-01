@@ -6,6 +6,9 @@ import io
 
 st.set_page_config(page_title="Cloud Vault Manager", layout="wide")
 
+# Default data source so the app is ready-to-go with no setup. A SHEET_URL secret overrides it.
+DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1V2CiPipVwtBu57AVUuh7wzsXDd8dm1Z4nemmS-n_WII/edit?gid=866947552#gid=866947552"
+
 def break_even(cost):
     return cost / 0.87
 
@@ -201,7 +204,7 @@ st.title("Cloud Vault Manager")
 if not check_password():
     st.stop()
 st.sidebar.header("Data Source")
-sheet_url = st.sidebar.text_input("Google Sheets URL", value=secret("SHEET_URL"),
+sheet_url = st.sidebar.text_input("Google Sheets URL", value=secret("SHEET_URL") or DEFAULT_SHEET_URL,
                                   placeholder="Paste your Google Sheets link here...")
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
